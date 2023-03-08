@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_camera.h"
@@ -24,7 +25,7 @@ SimpleTimer timer;
 
 int botRequestDelay = 1000;
 unsigned long lastTimeBotRan;
-
+String snapshot;
 #include <Bird-classifier_inferencing.h>
 #include "edge-impulse-sdk/dsp/image/image.hpp"
 
@@ -78,6 +79,9 @@ httpd_handle_t camera_httpd = NULL;
 const char* ssid = "Unknown";
 const char* password = "daredevilme";
 bool inClassificationProcess=false;
+// 0 means, send by socket and 1 send by post, the python server
+//needs to change for each type
+int sendImageType = 1; 
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
@@ -265,6 +269,31 @@ void getResponse(WiFiClient client) {
     }
   }
 }
+
+void sendSnapshot(String snapshot) {
+  // Create an HTTP client object
+  HTTPClient http;
+  IPAddress server(192, 168, 86, 44);
+  // Set the server address and port
+  http.begin("http://" + server.toString() + ":3459/snapshot");
+  
+  // Set the content type
+  http.addHeader("Content-Type", "image/jpeg");
+  
+  // Send the snapshot as a POST request
+  int httpResponseCode = http.POST((uint8_t *) snapshot.c_str(), snapshot.length());
+  
+  // Check the response code
+  if (httpResponseCode > 0) {
+    Serial.println("Snapshot sent successfully");
+  } else {
+    Serial.println("Error sending snapshot");
+  }
+  
+  // Close the connection
+  http.end();
+}
+
 // classify labels loop
 static esp_err_t classify_loop() {
   inClassificationProcess = true;
@@ -336,39 +365,46 @@ static esp_err_t classify_loop() {
   dl_matrix3du_free(image_matrix);
 
   classify();
-  if(result.classification[0].value>0.5){
+  if(result.classification[0].value>0.35){
     Serial.print(result.classification[0].label);
     Serial.print(":");
     Serial.println(result.classification[0].value);
-    WiFiClient client;
-    if (!client.connect("192.168.86.44", 3457)) {
-  
-        Serial.println("Connection to host failed");
-  
-        delay(1000);
-        return ESP_FAIL;
+    if(sendImageType == 0){
+      WiFiClient client;
+      if (!client.connect("192.168.86.44", 3457)) {
+    
+          Serial.println("Connection to host failed");
+    
+          delay(1000);
+          return ESP_FAIL;
+      }
+    
+      Serial.println("Connected to server successful!");
+      const char *data = (const char *)fb->buf;
+      // Image metadata.  Yes it should be cleaned up to use printf if the function is available
+      Serial.print("Size of image:");
+      Serial.println(fb->len);
+      Serial.print("Shape->width:");
+      Serial.print(fb->width);
+      Serial.print("height:");
+      Serial.println(fb->height);
+      client.print("Shape->width:");
+      client.print(fb->width);
+      client.print("height:");
+      client.println(fb->height);
+      delay(1000);
+      getResponse(client);
+      Serial.print(data);
+      client.write(data, fb->len);
+      Serial.println("Disconnecting...");
+      client.stop();
+      delay(2000);
+    } else {
+      // send by post
+      snapshot = (const char*)fb->buf;
+      sendSnapshot(snapshot);
+      snapshot="";
     }
-  
-    Serial.println("Connected to server successful!");
-    const char *data = (const char *)fb->buf;
-    // Image metadata.  Yes it should be cleaned up to use printf if the function is available
-    Serial.print("Size of image:");
-    Serial.println(fb->len);
-    Serial.print("Shape->width:");
-    Serial.print(fb->width);
-    Serial.print("height:");
-    Serial.println(fb->height);
-    client.print("Shape->width:");
-    client.print(fb->width);
-    client.print("height:");
-    client.println(fb->height);
-    delay(1000);
-    getResponse(client);
-    Serial.print(data);
-    client.write(data, fb->len);
-    Serial.println("Disconnecting...");
-    client.stop();
-    delay(2000);
   }
   esp_camera_fb_return(fb);
   
