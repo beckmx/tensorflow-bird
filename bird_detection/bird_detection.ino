@@ -81,9 +81,12 @@ const char* password = "daredevilme";
 bool inClassificationProcess=false;
 // 0 means, send by socket and 1 send by post, the python server
 //needs to change for each type
-int sendImageType = 1; 
+int sendImageType = 0; 
 
 void setup() {
+  //disable LED
+  pinMode(4, OUTPUT);
+  digitalWrite(4,LOW);
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
   Serial.begin(115200);
   Serial.setDebugOutput(true);
@@ -131,7 +134,7 @@ void setup() {
   //drop down frame size for higher initial frame rate
   sensor_t * s = esp_camera_sensor_get();
   s->set_framesize(s, FRAMESIZE_240X240);
-   
+  WiFi.setHostname("solarbird");
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -222,21 +225,21 @@ void classify()
   signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_WIDTH;
   signal.get_data = &raw_feature_get_data;
 
-  Serial.println("Run classifier...");
+  //Serial.println("Run classifier...");
   // Feed signal to the classifier
   EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false /* debug */);
 
   // Returned error variable "res" while data object.array in "result"
-  ei_printf("run_classifier returned: %d\n", res);
+  //ei_printf("run_classifier returned: %d\n", res);
   if (res != 0)
     return;
 
   // print the predictions
-  ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
+  /*ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
             result.timing.dsp, result.timing.classification, result.timing.anomaly);
   for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
     ei_printf("    %s: \t%f\r\n", result.classification[ix].label, result.classification[ix].value);
-  }
+  }*/
 #if EI_CLASSIFIER_HAS_ANOMALY == 1
   ei_printf("    anomaly score: %f\r\n", result.anomaly);
 #endif
@@ -309,6 +312,7 @@ static esp_err_t classify_loop() {
   {
     inClassificationProcess = false;
     Serial.println("Camera capture failed");
+    ESP.restart();
     return ESP_FAIL;
   }
   
@@ -329,11 +333,11 @@ static esp_err_t classify_loop() {
   out_width = fb->width;
   out_height = fb->height;
 
-  Serial.println("Converting to RGB888...");
+  //Serial.println("Converting to RGB888...");
   int64_t time_start = esp_timer_get_time();
   s = fmt2rgb888(fb->buf, fb->len, fb->format, out_buf);
   int64_t time_end = esp_timer_get_time();
-  Serial.printf("Done in %ums\n", (uint32_t)((time_end - time_start) / 1000));
+  //Serial.printf("Done in %ums\n", (uint32_t)((time_end - time_start) / 1000));
 
   
   if (!s)
@@ -356,11 +360,11 @@ static esp_err_t classify_loop() {
   ei_buf = ei_matrix->item;
   ei_len = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT * 3;
 
-  Serial.println("Resizing the frame buffer...");
+  //Serial.println("Resizing the frame buffer...");
   time_start = esp_timer_get_time();
   image_resize_linear(ei_buf, out_buf, EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT, 3, out_width, out_height);
   time_end = esp_timer_get_time();
-  Serial.printf("Done in %ums\n", (uint32_t)((time_end - time_start) / 1000));
+  //Serial.printf("Done in %ums\n", (uint32_t)((time_end - time_start) / 1000));
 
   dl_matrix3du_free(image_matrix);
 
@@ -372,10 +376,10 @@ static esp_err_t classify_loop() {
     if(sendImageType == 0){
       WiFiClient client;
       if (!client.connect("192.168.86.44", 3457)) {
-    
           Serial.println("Connection to host failed");
-    
+          esp_camera_fb_return(fb);
           delay(1000);
+          inClassificationProcess = false;
           return ESP_FAIL;
       }
     
@@ -393,7 +397,7 @@ static esp_err_t classify_loop() {
       client.print("height:");
       client.println(fb->height);
       delay(1000);
-      getResponse(client);
+      //getResponse(client);
       Serial.print(data);
       client.write(data, fb->len);
       Serial.println("Disconnecting...");
@@ -976,6 +980,33 @@ static esp_err_t index_handler(httpd_req_t *req)
   return httpd_resp_send(req, (const char *)index_custom_html, index_custom_html_len);
 }
 
+static esp_err_t activate_socket_handler(httpd_req_t *req) {
+  sendImageType=0;
+  String html = "<html><body>";
+  html += "<h1>Sensor Value: ";
+  html += sendImageType;
+  html += "</h1></body></html>";
+  httpd_resp_send(req, html.c_str(), html.length());
+  return ESP_OK;
+}
+static esp_err_t activate_post_handler(httpd_req_t *req) {
+  sendImageType=1;
+  String html = "<html><body>";
+  html += "<h1>Sensor Value: ";
+  html += sendImageType;
+  html += "</h1></body></html>";
+  httpd_resp_send(req, html.c_str(), html.length());
+  return ESP_OK;
+}
+static esp_err_t reboot_handler(httpd_req_t *req) {
+  String html = "<html><body>";
+  html += "<h1>Sensor Value: ";
+  html += "</h1></body></html>";
+  httpd_resp_send(req, html.c_str(), html.length());
+  ESP.restart();
+  return ESP_OK;
+}
+
 void startCameraServer()
 {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -1029,6 +1060,24 @@ void startCameraServer()
     .user_ctx = NULL
   };
 
+  httpd_uri_t activate_socket_uri = {
+      .uri = "/activate_socket",
+      .method = HTTP_GET,
+      .handler = activate_socket_handler,
+      .user_ctx = NULL
+    };
+    httpd_uri_t activate_post_uri = {
+      .uri = "/activate_post",
+      .method = HTTP_GET,
+      .handler = activate_post_handler,
+      .user_ctx = NULL
+    };
+    httpd_uri_t reboot_uri = {
+      .uri = "/reboot",
+      .method = HTTP_GET,
+      .handler = reboot_handler,
+      .user_ctx = NULL
+    };
   ra_filter_init(&ra_filter, 20);
 
   Serial.printf("Starting web server on port: '%d'\n", config.server_port);
@@ -1040,6 +1089,9 @@ void startCameraServer()
     httpd_register_uri_handler(camera_httpd, &capture_uri);
     httpd_register_uri_handler(camera_httpd, &inference_uri);
     httpd_register_uri_handler(camera_httpd, &inference_results_uri);
+    httpd_register_uri_handler(camera_httpd, &activate_socket_uri);
+    httpd_register_uri_handler(camera_httpd, &activate_post_uri);
+    httpd_register_uri_handler(camera_httpd, &reboot_uri);
   }
 
   config.server_port += 1;
@@ -1059,5 +1111,5 @@ void startCameraServer()
 void loop() {
   // put your main code here, to run repeatedly:
   //delay(10000);
-  timer.run(); 
+  //timer.run(); 
 }
